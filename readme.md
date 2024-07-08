@@ -4,6 +4,9 @@
 ## 使用
 
 首先需要使用tsc编译为`main.js`，使用`tsc --target ES2022 main.ts`
+
+或者下载release中编译完成的JavaScript文件
+
 接下来在nginx配置文件`server`块中添加：
 
     js_import main.js;

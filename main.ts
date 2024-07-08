@@ -10,7 +10,7 @@
  * @license MIT
  */
 
-import fs, { NjsStats } from "fs";
+import fs from "fs";
 
 /**
  * 应用根目录，暴露在list下
@@ -151,6 +151,10 @@ async function main(h:NginxHTTPRequest){
     // 文件服务
     if(FILE_TRANSITION && h.method == 'GET' && h.args.file)
     return (async function(){
+        // 前提检测
+        if(h.args.file.includes('..'))
+            return h.return(403, 'Bad path');
+
         try{
             var path = APP_ROOT + '/' + h.args.file,
                 file = await fs.promises.open(path, 'r'),
@@ -162,7 +166,6 @@ async function main(h:NginxHTTPRequest){
         // 添加mime和修改时间
         h.headersOut['Content-Type'] = h.args.mime || 'application/octet-stream';
         h.headersOut['ETag'] = stat.ctimeMs.toString(36);
-        h.rawHeadersOut.push(['Accept-Ranges', 'bytes']);
 
         // 检查是否有缓存
         let etag;
@@ -246,6 +249,11 @@ async function main(h:NginxHTTPRequest){
     // 文件上传
     if(h.args.action == 'upload' && h.requestBuffer) 
         try{
+            // 前提检测
+            if(h.args.path.includes('..'))
+                return h.return(403, 'Bad path');
+
+            // 打开文件
             const file = await fs.promises.open(APP_ROOT + '/' + h.args.path,'w'),
                 buf = new Uint8Array(h.requestBuffer.buffer);
             let readed = 0;
@@ -272,6 +280,10 @@ async function main(h:NginxHTTPRequest){
             const dir = APP_ROOT + '/' + request.path;
             if(typeof dir != 'string')
                 return h.return(400,'invaild request: Missing `path` field');
+            // 前提检测
+            if(request.path.includes('..'))
+                return h.return(403, 'Bad path');
+            // 尝试访问
             try{
                 await fs.promises.access(dir,fs.constants.R_OK);
             }catch(e){
@@ -281,6 +293,7 @@ async function main(h:NginxHTTPRequest){
             const files = await fs.promises.readdir(dir);
             for (let i = 0; i < files.length; i++)
                 try{
+                    // 隐藏文件
                     if(HIDE_FILES(files[i])) continue;
                     const statres = await stat(dir + '/' + files[i],files[i]);
                     res.push(statres );
@@ -296,6 +309,9 @@ async function main(h:NginxHTTPRequest){
             const dir = APP_ROOT + '/' + request.path;
             if(typeof dir != 'string')
                 return h.return(400,'invaild request: Missing `path` field');
+            // 前提检测
+            if(request.path.includes('..'))
+                return h.return(403, 'Bad path');
 
             try{
                 await fs.promises.access(dir,fs.constants.R_OK);
@@ -371,6 +387,9 @@ async function main(h:NginxHTTPRequest){
             
             for (let i = 0; i < request.files.length; i++)
                 try{
+                    // 前提检测
+                    if(request.files[i].includes('..'))
+                        throw 'Bad path';
                     await del(APP_ROOT + '/' + request.files[i]);
                 }catch(e){
                     return h.return(403,'Delete "' + request.files[i] + '" Failed: ' + (
@@ -386,6 +405,10 @@ async function main(h:NginxHTTPRequest){
             const file = APP_ROOT + '/' + request.path;
             if(typeof file != 'string')
                 return h.return(400,'invaild request: Missing `path` field');
+            // 前提检测
+            if(request.path.includes('..'))
+                return h.return(403, 'Bad path');
+
             const res = await stat(file,file.split('/').pop() as string);
             h.headersOut['Content-Type'] = 'application/json';
             return h.return(200,JSON.stringify(res));
@@ -397,8 +420,11 @@ async function main(h:NginxHTTPRequest){
                 return h.return(400,'Request param <from> Is Not an array');
             if(!request.to)
                 return h.return(400,'No Destination(to) found');
+            // 前提检测
+            if(request.to.includes('..'))
+                return h.return(403, 'Bad output path');
             try{
-                const stato = await fs.promises.stat(request.to,{
+                const stato = await fs.promises.stat(APP_ROOT + '/' + request.to,{
                     throwIfNoEntry: true
                 });
                 if(!stato.isDirectory())
@@ -408,6 +434,11 @@ async function main(h:NginxHTTPRequest){
             }
 
             for (let i = 0; i < request.from.length; i++) try{
+
+                // 前提检测
+                if(request.from[i].includes('..'))
+                    return h.return(403, 'Bad input path: ' + request.from[i]);
+
                 const f = request.from[i] as string,
                     fname = f.match(/\/([^/]+)\/?$/);
                 if(!fname) throw new Error('Unknown source ' + f);
@@ -429,6 +460,8 @@ async function main(h:NginxHTTPRequest){
                 return h.return(400,'Request param <from> Is Not an array');
             if(!request.to)
                 return h.return(400,'No Destination(to) found');
+            if(request.to.includes('..'))
+                return h.return(403, 'Bad output path');
 
             const to = APP_ROOT + '/' + request.to,
                 to_stat = await fs.promises.stat(to);
@@ -437,6 +470,10 @@ async function main(h:NginxHTTPRequest){
                 return h.return(400,'<to> is not a dir');
 
             for (let i = 0; i < request.from.length; i++) try{
+                // 前提检测
+                if(request.from[i].includes('..'))
+                    return h.return(403, 'Bad input path: ' + request.from[i]);
+
                 const from = APP_ROOT + '/' + request.from[i],
                     stat = await fs.promises.stat(from);
                 
@@ -463,6 +500,9 @@ async function main(h:NginxHTTPRequest){
 
             const emptyBuffer = new Uint8Array();
             for (let i = 0; i < request.files.length; i++) try{
+                // 前提检测
+                if(request.files[i].includes('..'))
+                    return h.return(403, 'Bad path: ' + request.files[i]);
                 await fs.promises.writeFile(APP_ROOT + '/' + request.files[i] ,emptyBuffer ,{
                     mode: request.mode || 0o0755
                 });
