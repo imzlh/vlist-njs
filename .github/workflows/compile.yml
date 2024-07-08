@@ -26,7 +26,7 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
-    - run: npm install -g typscript
+    - run: npm install -g typescript
     - run: tsc --target ES2022 --lib ES2022 main.ts
     - name: Upload binaries to release
       uses: svenstaro/upload-release-action@v2
