@@ -78,7 +78,7 @@ async function copy(from: string,to: string) {
         }catch(e){
             // 尝试创建文件夹
             try{
-                fs.promises.mkdir(to);
+                await fs.promises.mkdir(to);
                 var dest_is_dir = true;
             }catch(e){
                 throw new Error('Access failed');
@@ -121,7 +121,7 @@ async function copy(from: string,to: string) {
                     throw new Error('Parent Path(' + dest + ') is not a dir');
             }catch(e){
                 try{
-                    fs.promises.mkdir(dest);
+                    await fs.promises.mkdir(dest);
                 }catch(e){
                     throw new Error('Copy abort: Create dir failed')
                 }
@@ -571,6 +571,22 @@ async function main(h:NginxHTTPRequest){
                 );
             }catch(e){
                 return _error(e, 'Copy')
+            }
+            return h.return(200);
+        }
+
+        // 重命名文件
+        case 'rename':{
+            for (let from in request) try{
+                if(typeof request[from] != 'string' || (from + request[from]).includes('..'))
+                    throw 'Bad Path';
+
+                const to = APP_ROOT + '/' + request[from];
+                from = APP_ROOT + '/' + from;
+
+                await fs.promises.rename(from, to);
+            }catch(e){
+                return _error(e, 'Rename');
             }
             return h.return(200);
         }
