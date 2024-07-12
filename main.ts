@@ -38,6 +38,14 @@ const BUFFER_LENGTH = 128 * 1024;
 const FILE_TRANSITION = true;
 
 /**
+ * 避免身份认证的方式
+ */
+const AUTH_IGNORE = [
+    'list',
+    'slist'
+];
+
+/**
  * 获取单个文件的状态
  * @param file 文件路径
  * @param name 文件实际名称
@@ -193,7 +201,7 @@ async function asyncFilter<T>(items: Array<T>, callback: (item: T, index: number
  */
 async function serve(h: NginxHTTPRequest){
     // 前提检测
-    if(h.args.file.includes('..'))
+    if(h.args.file.includes('/../'))
         throw h.return(403, 'Bad path');
 
     try{
@@ -284,11 +292,54 @@ async function serve(h: NginxHTTPRequest){
     h.finish();
 }
 
+/**
+ * 格式化路径
+ * @param path 路径
+ * @param is_dir 是文件夹，那么末尾会带上"/"
+ * @returns 格式化后的路径
+ */
 function format(path: string, is_dir: boolean | undefined){
     path = path.replace(/[\/\\]+/,'/');
     if(is_dir && path[path.length -1] != '/') return path + '/';
     else if(!is_dir && path[path.length -1] == '/' ) return path.substring(0, path.length -1);
     else return path;
+}
+
+/**
+ * 为双方安全传输编码的函数
+ * @param ctxlen 消息长度
+ * @param pass 密码
+ * @returns 加密后的信息
+ */
+async function encrypto(ctxlen: number, pass: string, content: string):Promise<string>{
+    // 验证时间有效性: 10s内
+    const timestrap = Date.now() / 1000;
+    let timecode = Math.floor(timestrap / 10);
+    if(timestrap % 10 > 5)
+        timecode += 1;
+
+    // 打乱pass，验证消息有效性
+    const pass_code = new TextEncoder().encode(pass),
+        encrypto = timecode & ctxlen;
+    let safeCode = 0;
+    for (let i = 0; i < pass_code.length; i++) 
+        safeCode += (pass_code[i] << (4 * i % 4)) & (pass_code[i] >> 4);
+    const hmac_key = (safeCode ^ encrypto).toString(20);
+
+    // hmac+sha1加密
+    const hmac = await crypto.subtle.importKey(
+            'raw', 
+            new TextEncoder().encode(hmac_key),
+            {
+                "name": "HMAC",
+                "hash": "SHA-256"
+            },
+            false,
+            ['sign']
+        ),
+        value = await crypto.subtle.sign('HMAC', hmac, new TextEncoder().encode(content));
+    const process = (input:number) => input < 0x20 ? input + 0x20 : (input > 0x7e) ? (input - 0x7e > 0x7e) ? 0x7e : input - 0x7e : input;
+    return new TextDecoder().decode( value).replace(/[^\x20-\x7E]/g, input => String.fromCharCode(process(input.charCodeAt(0)))).trim();
 }
 
 /**
@@ -331,19 +382,53 @@ async function main(h:NginxHTTPRequest){
     if(typeof h.args.action != 'string')
         return h.return(400,'invaild request: Action should be defined');
 
+    // 获取authkey
+    const AUTHKEY = h.variables.authkey as string;
+
+    // 文件上传提前检测
+    if(h.args.action == 'upload' && h.method == 'GET' && h.args.length && h.args.type){
+        if(!AUTH_IGNORE.includes('upload')){
+            if(!h.headersIn['Authorization']) return h.return(400, 'Auth required');
+            if(
+                h.headersIn['Authorization'] != await encrypto(
+                    parseInt(h.args.length),
+                    AUTHKEY,
+                    h.args.type as string
+                )
+            ) return h.return(401, 'auth precheck failed');
+        }
+        try{
+            await fs.promises.writeFile(APP_ROOT + '/' + format(h.args.path,false), '');
+        }catch(e){
+            return _error(e, 'PreUpload');
+        }
+        return h.return(204);
+    }
+
     // 读取body: POST 且 长度 > 0
-    if(h.method != 'POST' || !h.headersIn['Content-Length'])
+    if(h.method != 'POST' || !h.headersIn['Content-Length'] || h.headersIn['Content-Length'] == '0')
         return h.return(400,'Bad Method(POST only or losing BODY)');
 
     // 文件上传
     if(h.args.action == 'upload')
         try{
             // 前提检测
-            if(h.args.path.includes('..'))
+            if(h.args.path.includes('/../'))
                 return h.return(403, 'Bad path');
 
-            const dest = APP_ROOT + '/' + format(h.args.path,false);
+            // 加密检测
+            if(
+                !AUTH_IGNORE.includes('upload') && (
+                !h.headersIn['Authorization'] || 
+                h.headersIn['Authorization'] != await encrypto(
+                    parseInt(h.headersIn['Content-Length']),
+                    AUTHKEY,
+                    h.headersIn['Content-Type'] as string
+                )
+            )) return h.return(401, 'require auth');
 
+            // 开始上传
+            const dest = APP_ROOT + '/' + format(h.args.path,false);
             try{
                 // 内容不在内存中
                 if(h.requestBuffer && h.requestBuffer.length == 0) throw 0;
@@ -360,17 +445,15 @@ async function main(h:NginxHTTPRequest){
                     if(readed.bytesRead == 0) break;
                     to.write(buf, 0, readed.bytesRead, null);
                 }
-                return h.return(200);
+                return h.return(204);
             }
             
             // 写入Buffer
-            const file = await fs.promises.open(dest,'w'),
-                buf = new Uint8Array((h.requestBuffer as Buffer).buffer);
-            let readed = 0;
-            while(buf.byteLength < readed)
-                readed += (await file.write(buf, readed)).bytesWritten;
-
-            return h.return(200);
+            await fs.promises.writeFile(dest, h.requestBuffer as Buffer,{
+                "flag": 'w',
+                "mode": 0o755
+            });
+            return h.return(204);
         }catch(e){
             return _error(e, 'Upload');
         }
@@ -389,6 +472,17 @@ async function main(h:NginxHTTPRequest){
             text = (await fs.promises.readFile(file)).toString('utf8');
         }
 
+        // 尝试身份认证
+        if(
+            !AUTH_IGNORE.includes(h.args.action) &&
+            (!h.headersIn['Authorization'] || 
+            h.headersIn['Authorization'] != await encrypto(
+                parseInt(h.headersIn['Content-Length']),
+                AUTHKEY,
+                text
+            ))
+        ) return h.return(401, 'Auth required');
+
         // 尝试解析JSON
         var request = JSON.parse(text);
         if(typeof request != 'object') throw 0;
@@ -404,7 +498,7 @@ async function main(h:NginxHTTPRequest){
             if(typeof dir != 'string')
                 return h.return(400,'invaild request: Missing `path` field');
             // 前提检测
-            if(request.path.includes('..'))
+            if(request.path.includes('/../'))
                 return h.return(403, 'Bad path');
             // 尝试访问
             try{
@@ -433,7 +527,7 @@ async function main(h:NginxHTTPRequest){
             if(typeof dir != 'string')
                 return h.return(400,'invaild request: Missing `path` field');
             // 前提检测
-            if(request.path.includes('..'))
+            if(request.path.includes('/../'))
                 return h.return(403, 'Bad path');
 
             try{
@@ -511,14 +605,14 @@ async function main(h:NginxHTTPRequest){
             for (let i = 0; i < request.files.length; i++)
                 try{
                     // 前提检测
-                    if(request.files[i].includes('..'))
+                    if(request.files[i].includes('/../'))
                         throw 'Bad path';
                     await del(APP_ROOT + '/' + request.files[i]);
                 }catch(e){
                     return _error(e, 'Delete');
                 }
 
-            return h.return(200);
+            return h.return(204);
         }
 
         // 获取单个文件信息
@@ -527,7 +621,7 @@ async function main(h:NginxHTTPRequest){
             if(typeof file != 'string')
                 return h.return(400,'invaild request: Missing `path` field');
             // 前提检测
-            if(request.path.includes('..'))
+            if(request.path.includes('/../'))
                 return h.return(403, 'Bad path');
             try{
                 const res = await stat(file,file.split('/').pop() as string);
@@ -545,7 +639,7 @@ async function main(h:NginxHTTPRequest){
             if(!request.to)
                 return h.return(400,'No Destination(to) found');
             // 前提检测
-            if(request.to.includes('..'))
+            if(request.to.includes('/../'))
                 return h.return(403, 'Bad output path');
             try{
                 const stato = await fs.promises.stat(APP_ROOT + '/' + request.to,{
@@ -559,7 +653,7 @@ async function main(h:NginxHTTPRequest){
 
             for (let i = 0; i < request.from.length; i++) try{
                 // 前提检测
-                if(request.from[i].includes('..'))
+                if(request.from[i].includes('/../'))
                     return h.return(403, 'Bad input path: ' + request.from[i]);
 
                 const f = request.from[i] as string,
@@ -572,13 +666,13 @@ async function main(h:NginxHTTPRequest){
             }catch(e){
                 return _error(e, 'Copy')
             }
-            return h.return(200);
+            return h.return(204);
         }
 
         // 重命名文件
         case 'rename':{
             for (let from in request) try{
-                if(typeof request[from] != 'string' || (from + request[from]).includes('..'))
+                if(typeof request[from] != 'string' || (from + request[from]).includes('/../'))
                     throw 'Bad Path';
 
                 const to = APP_ROOT + '/' + request[from];
@@ -588,7 +682,7 @@ async function main(h:NginxHTTPRequest){
             }catch(e){
                 return _error(e, 'Rename');
             }
-            return h.return(200);
+            return h.return(204);
         }
 
         // 移动文件
@@ -597,7 +691,7 @@ async function main(h:NginxHTTPRequest){
                 return h.return(400,'Request param <from> Is Not an array');
             if(!request.to)
                 return h.return(400,'No Destination(to) found');
-            if(request.to.includes('..'))
+            if(request.to.includes('/../'))
                 return h.return(403, 'Bad output path');
 
             const to = APP_ROOT + '/' + format(request.to, true),
@@ -608,7 +702,7 @@ async function main(h:NginxHTTPRequest){
 
             for (let i = 0; i < request.from.length; i++) try{
                 // 前提检测
-                if(request.from[i].includes('..'))
+                if(request.from[i].includes('/../'))
                     return h.return(403, 'Bad input path: ' + request.from[i]);
 
                 const from = APP_ROOT + '/' + format(request.from[i], false),
@@ -632,7 +726,7 @@ async function main(h:NginxHTTPRequest){
             }catch(e){
                 return _error(e, 'Move');
             }
-            return h.return(200);
+            return h.return(204);
         }
 
         // 创建新文件
@@ -643,7 +737,7 @@ async function main(h:NginxHTTPRequest){
             const emptyBuffer = new Uint8Array();
             for (let i = 0; i < request.files.length; i++) try{
                 // 前提检测
-                if(request.files[i].includes('..'))
+                if(request.files[i].includes('/../'))
                     return h.return(403, 'Bad path: ' + request.files[i]);
                 await fs.promises.writeFile(APP_ROOT + '/' + request.files[i] ,emptyBuffer ,{
                     mode: request.mode || 0o0755
@@ -651,7 +745,7 @@ async function main(h:NginxHTTPRequest){
             }catch(e){
                 return _error(e, 'Create File')
             }
-            return h.return(200);
+            return h.return(204);
         }
         
         default:{
@@ -660,4 +754,4 @@ async function main(h:NginxHTTPRequest){
     }
 }
 
-export default { main };
+export default { main: (h:NginxHTTPRequest) => main(h).catch(() => void 0) };
