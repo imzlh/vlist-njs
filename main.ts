@@ -388,8 +388,8 @@ async function main(h:NginxHTTPRequest){
     // 文件上传提前检测
     if(h.args.action == 'upload' && h.method == 'GET' && h.args.length && h.args.type){
         if(!AUTH_IGNORE.includes('upload')){
-            if(!h.headersIn['Authorization']) return h.return(400, 'Auth required');
             if(
+                !h.headersIn['Authorization'] ||
                 h.headersIn['Authorization'] != await encrypto(
                     parseInt(h.args.length),
                     AUTHKEY,
