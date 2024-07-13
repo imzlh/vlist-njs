@@ -338,8 +338,19 @@ async function encrypto(ctxlen: number, pass: string, content: string):Promise<s
             ['sign']
         ),
         value = await crypto.subtle.sign('HMAC', hmac, new TextEncoder().encode(content));
-    const process = (input:number) => input < 0x20 ? input + 0x20 : (input > 0x7e) ? (input - 0x7e > 0x7e) ? 0x7e : input - 0x7e : input;
-    return new TextDecoder().decode( value).replace(/[^\x20-\x7E]/g, input => String.fromCharCode(process(input.charCodeAt(0)))).trim();
+        const process = (input:number) => 
+            input <= 0x20 
+                ? input + 0x20 
+                : input > 0x7e 
+                    ? input - 0x7e < 0x20
+                        ? 0x21
+                        : input - 0x7e > 0x7e
+                            ? 0x7b
+                            : input - 0x7e 
+                    : input;
+        let out = ''
+        new Uint8Array(value).forEach(item => out += String.fromCharCode(process(item)));
+        return out;
 }
 
 /**
@@ -386,14 +397,14 @@ async function main(h:NginxHTTPRequest){
     const AUTHKEY = h.variables.authkey as string;
 
     // 文件上传提前检测
-    if(h.args.action == 'upload' && h.method == 'GET' && h.args.length && h.args.type){
+    if(h.args.action == 'upload' && h.method == 'GET' && h.args.length && h.args.path){
         if(!AUTH_IGNORE.includes('upload')){
             if(
                 !h.headersIn['Authorization'] ||
                 h.headersIn['Authorization'] != await encrypto(
                     parseInt(h.args.length),
                     AUTHKEY,
-                    h.args.type as string
+                    h.args.path
                 )
             ) return h.return(401, 'auth precheck failed');
         }
@@ -423,7 +434,7 @@ async function main(h:NginxHTTPRequest){
                 h.headersIn['Authorization'] != await encrypto(
                     parseInt(h.headersIn['Content-Length']),
                     AUTHKEY,
-                    h.headersIn['Content-Type'] as string
+                    h.args.path
                 )
             )) return h.return(401, 'require auth');
 
