@@ -28,16 +28,6 @@ const HIDE_FILES = (name: string) => name[0] == '.';
 const CORS_ENABLE = true;
 
 /**
- * 文件传输Buffer
- */
-const BUFFER_LENGTH = 128 * 1024;
-
-/**
- * 允许文件传输
- */
-const FILE_TRANSITION = true;
-
-/**
  * 避免身份认证的方式
  */
 const AUTH_IGNORE = [
@@ -58,7 +48,7 @@ async function stat(file: string,name: string) {
     return {
         'type': i.isDirectory() ? 'dir' : 'file',
         'name': name,
-        'ctime': i.ctime,
+        'ctime': i.ctime.getTime(),
         'access': i.mode,
         'size': i.size
     };
@@ -196,103 +186,6 @@ async function asyncFilter<T>(items: Array<T>, callback: (item: T, index: number
 }
 
 /**
- * 服务文件
- * @param h 
- */
-async function serve(h: NginxHTTPRequest){
-    // 前提检测
-    if(h.args.file.includes('/../'))
-        throw h.return(403, 'Bad path');
-
-    try{
-        // 打开文件
-        var path = APP_ROOT + '/' + format(h.args.file, false),
-            file = await fs.promises.open(path, 'r'),
-            stat = await file.stat();
-        if(!stat.isFile())
-            throw new Error('Not a file');
-    }catch(e){
-        throw h.return(403,'Access Failed: ' + (e instanceof Error ? e.message : new String(e)));
-    }
-
-    // 添加mime和修改时间
-    h.headersOut['Content-Type'] = h.args.mime || 'application/octet-stream';
-    h.headersOut['ETag'] = stat.ctimeMs.toString(36);
-
-    // 检查是否有缓存
-    let etag;
-    h.rawHeadersIn.forEach(item => (item[0].toLowerCase() == 'etag') && (etag = item[1]));
-    
-    if (etag && etag == stat.ctimeMs.toString(36)) {
-        h.headersOut['Content-Length'] = stat.size.toString();
-        throw h.return(304);
-    } else {
-        // 文件：服务文件
-        if(h.headersIn['Range']){
-            const range = h.headersIn['Range'].match(/^bytes=\s*([0-9]*)-([0-9]*)?/i);
-            if(!range || (range[1] == '' && range[2] == ''))
-                return h.return(400,'Bad range');
-            
-            let start,end;
-            // 倒数n个字符串
-            if(range[1] == ''){
-                start = stat.size - parseInt(range[2]);
-                end = stat.size -1;
-            // 正数n到最后面
-            }else if(range[2] == ''){
-                start = parseInt(range[1]);
-                end = stat.size -1;
-            // 两个都写明了
-            }else{
-                start = parseInt(range[1]);
-                end = parseInt(range[2]);
-            }
-
-            // 判断位置
-            if(end >= stat.size)
-                throw h.return(416,"Out of fileSize($fsize)");
-            else if(end < start)
-                throw h.return(400,`Illegal range(#0:${start} >= #1:${end})`);
-            
-            // 输出header
-            h.status = 206;
-            h.headersOut['Content-Length'] = (end - start +1).toString();
-            h.headersOut['Content-Range'] = `bytes ${range[1]}-${(end || stat.size)-1}/${stat.size}`;
-            h.sendHeader();
-
-            let pos = start;
-            do{
-                const read = pos + BUFFER_LENGTH > end ? end - pos : BUFFER_LENGTH,
-                    readed = await file.read(
-                        new Uint8Array(read), 0, read, pos
-                    );
-                pos += readed.bytesRead;
-
-                h.send(readed.buffer);
-            }while(pos != end);
-        }else{
-            h.headersOut['Content-Length'] = stat.size.toString();
-            h.status = 200;
-            h.sendHeader();
-            while(true){
-                const readed = await file.read(
-                        new Uint8Array(BUFFER_LENGTH), 0, BUFFER_LENGTH, null
-                    );
-
-                h.send(
-                    readed.bytesRead == BUFFER_LENGTH
-                        ? readed.buffer
-                        : readed.buffer.buffer.slice(0,readed.bytesRead)
-                );
-
-                if(readed.bytesRead != BUFFER_LENGTH) break;
-            }
-        }
-    }
-    h.finish();
-}
-
-/**
  * 格式化路径
  * @param path 路径
  * @param is_dir 是文件夹，那么末尾会带上"/"
@@ -303,6 +196,32 @@ function format(path: string, is_dir: boolean | undefined){
     if(is_dir && path[path.length -1] != '/') return path + '/';
     else if(!is_dir && path[path.length -1] == '/' ) return path.substring(0, path.length -1);
     else return path;
+}
+
+const b64ch = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+const b64chs = Array.prototype.slice.call(b64ch);
+
+/**
+ * base64编码
+ * @param buf 输入
+ * @returns 输出
+ */
+function base64_encode(buf: ArrayBuffer){
+    const bin = new Uint8Array(buf);
+    let u32, c0, c1, c2, asc = '';
+    const pad = bin.length % 3;
+    for (let i = 0; i < bin.length;) {
+        c0 = bin[i++],
+        c1 = bin[i++],
+        c2 = bin[i++];
+
+        u32 = (c0 << 16) | (c1 << 8) | c2;
+        asc += b64chs[u32 >> 18 & 63]
+            + b64chs[u32 >> 12 & 63]
+            + b64chs[u32 >> 6 & 63]
+            + b64chs[u32 & 63];
+    }
+    return pad ? asc.slice(0, pad - 3) + "===".substring(pad) : asc;
 }
 
 /**
@@ -328,29 +247,18 @@ async function encrypto(ctxlen: number, pass: string, content: string):Promise<s
 
     // hmac+sha1加密
     const hmac = await crypto.subtle.importKey(
-            'raw', 
-            new TextEncoder().encode(hmac_key),
-            {
-                "name": "HMAC",
-                "hash": "SHA-256"
-            },
-            false,
-            ['sign']
-        ),
-        value = await crypto.subtle.sign('HMAC', hmac, new TextEncoder().encode(content));
-        const process = (input:number) => 
-            input <= 0x20 
-                ? input + 0x20 
-                : input > 0x7e 
-                    ? input - 0x7e < 0x20
-                        ? 0x21
-                        : input - 0x7e > 0x7e
-                            ? 0x7b
-                            : input - 0x7e 
-                    : input;
-        let out = ''
-        new Uint8Array(value).forEach(item => out += String.fromCharCode(process(item)));
-        return out;
+        'raw', 
+        new TextEncoder().encode(hmac_key),
+        {
+            "name": "HMAC",
+            "hash": "SHA-1"
+        },
+        false,
+        ['sign']
+    );
+        var value = await crypto.subtle.sign('HMAC', hmac, content);
+
+    return base64_encode(value);
 }
 
 /**
@@ -369,6 +277,99 @@ async function main(h:NginxHTTPRequest){
         ngx.log(ngx.ERR, new String(e).toString());
     }
 
+    // 返回json
+    function _json(obj: Object){
+        // 发送header
+        h.headersOut['Transfer-Encoding'] = 'chunked';
+        h.status = 200;
+        try{ h.sendHeader(); }catch(e){}
+        
+        // 编码一项
+        function encode_obj(o: Record<string, any>){
+            const keys = Object.keys(o), length = keys.length;
+
+            h.send('{');
+
+            // 依次编码
+            for (let i = 0 ; i < length ; i++) {
+                if (!Object.prototype.hasOwnProperty.call(o, keys[i])) continue;
+                switch(typeof o[keys[i]]){
+                    case "string":
+                        h.send(`"${keys[i].replace('"','\"')}": "${o[keys[i]]}"`);
+                    break;
+
+                    case "bigint":
+                    case "number":
+                        h.send(`"${keys[i].replace('"','\"')}": ${o[keys[i]]}`);
+                    break;
+
+                    case "boolean":
+                        h.send(`"${keys[i].replace('"','\"')}": ${o[keys[i]] ? 'true' : 'false'}`);
+                    break;
+
+                    case "object":
+                        h.send(`"${keys[i].replace('"','\"')}": `);
+                        if(h instanceof Array)
+                            encode_arr(h);
+                        else
+                            encode_obj(o);
+                    break;
+
+                    default:
+                    continue;
+                }
+
+                // 不是最后一个：加逗号
+                if(length-1 != i) h.send(',');
+                
+            }
+            
+            h.send('}');
+        }
+
+        // 编码Array
+        function encode_arr(arr:Array<any>){
+
+            h.send('[');
+
+            for (let i = 0 ; i < arr.length ; i++) {
+                switch(typeof arr[i]){
+                    case "string":
+                        h.send(`"${arr[i]}"`);
+                    break;
+
+                    case "bigint":
+                    case "number":
+                        h.send(arr[i].toString());
+                    break;
+
+                    case "boolean":
+                        h.send(arr[i] ? 'true' : 'false');
+                    break;
+
+                    case "object":
+                        if(h instanceof Array)
+                            encode_arr(arr[i]);
+                        else
+                            encode_obj(arr[i]);
+                    break;
+
+                    default:
+                    continue;
+                }
+
+                // 不是最后一个：加逗号
+                if(arr.length -1 != i) h.send(',');
+            }
+
+            h.send(']');
+        }
+
+        // 开始编码
+        encode_obj(obj);
+        h.finish();
+    }
+
     // txt
     h.headersOut["Content-Type"] = 'text/plain';
 
@@ -383,11 +384,6 @@ async function main(h:NginxHTTPRequest){
         h.headersOut['Allow'] = 'OPTIONS, GET, POST';
         return h.return(204);
     }
-
-    // 文件服务
-    if(FILE_TRANSITION && h.method == 'GET' && h.args.file)
-    return serve(h)
-        .catch(e => _error(e, 'File Serve'));
 
     // 行为
     if(typeof h.args.action != 'string')
@@ -528,8 +524,8 @@ async function main(h:NginxHTTPRequest){
                 }catch(e){
                     return h.return(403,'Access Failed');
                 }
-            h.headersOut['Content-Type'] = 'application/json';
-            return h.return(200,JSON.stringify(res));
+            return h.return(200, JSON.stringify(res));
+            // return _json(res);
         }
 
         // 列表
@@ -604,8 +600,8 @@ async function main(h:NginxHTTPRequest){
                 );
             }
 
-            h.headersOut['Content-Type'] = 'application/json';
-            return h.return(200,JSON.stringify(files));
+            // return _json(files);
+            return h.return(200, JSON.stringify(files));
         }
 
         // 批量删除
@@ -637,7 +633,8 @@ async function main(h:NginxHTTPRequest){
             try{
                 const res = await stat(file,file.split('/').pop() as string);
                 h.headersOut['Content-Type'] = 'application/json';
-                return h.return(200,JSON.stringify(res));
+                // return _json(res);
+                return h.return(200, JSON.stringify(res));
             }catch(e){
                 return _error(e, 'Stat');
             }
