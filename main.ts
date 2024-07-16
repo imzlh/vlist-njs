@@ -231,32 +231,23 @@ function base64_encode(buf: ArrayBuffer){
  * @returns 加密后的信息
  */
 async function encrypto(ctxlen: number, pass: string, content: string):Promise<string>{
-    // 验证时间有效性: 10s内
-    const timestrap = Date.now() / 1000;
-    let timecode = Math.floor(timestrap / 10);
-    if(timestrap % 10 > 5)
-        timecode += 1;
-
     // 打乱pass，验证消息有效性
-    const pass_code = new TextEncoder().encode(pass),
-        encrypto = timecode & ctxlen;
-    let safeCode = 0;
+    const pass_code = new TextEncoder().encode(pass);
+    if(ctxlen < 1000) ctxlen *= ctxlen;
     for (let i = 0; i < pass_code.length; i++) 
-        safeCode += (pass_code[i] << (4 * i % 4)) & (pass_code[i] >> 4);
-    const hmac_key = (safeCode ^ encrypto).toString(20);
+        pass_code[i] &= ctxlen >> (i % 4);
 
     // hmac+sha1加密
     const hmac = await crypto.subtle.importKey(
         'raw', 
-        new TextEncoder().encode(hmac_key),
+        pass_code,
         {
             "name": "HMAC",
             "hash": "SHA-1"
         },
         false,
         ['sign']
-    );
-        var value = await crypto.subtle.sign('HMAC', hmac, content);
+    ),value = await crypto.subtle.sign('HMAC', hmac, new TextEncoder().encode(content));
 
     return base64_encode(value);
 }
@@ -275,99 +266,6 @@ async function main(h:NginxHTTPRequest){
             )
         );
         ngx.log(ngx.ERR, new String(e).toString());
-    }
-
-    // 返回json
-    function _json(obj: Object){
-        // 发送header
-        h.headersOut['Transfer-Encoding'] = 'chunked';
-        h.status = 200;
-        try{ h.sendHeader(); }catch(e){}
-        
-        // 编码一项
-        function encode_obj(o: Record<string, any>){
-            const keys = Object.keys(o), length = keys.length;
-
-            h.send('{');
-
-            // 依次编码
-            for (let i = 0 ; i < length ; i++) {
-                if (!Object.prototype.hasOwnProperty.call(o, keys[i])) continue;
-                switch(typeof o[keys[i]]){
-                    case "string":
-                        h.send(`"${keys[i].replace('"','\"')}": "${o[keys[i]]}"`);
-                    break;
-
-                    case "bigint":
-                    case "number":
-                        h.send(`"${keys[i].replace('"','\"')}": ${o[keys[i]]}`);
-                    break;
-
-                    case "boolean":
-                        h.send(`"${keys[i].replace('"','\"')}": ${o[keys[i]] ? 'true' : 'false'}`);
-                    break;
-
-                    case "object":
-                        h.send(`"${keys[i].replace('"','\"')}": `);
-                        if(h instanceof Array)
-                            encode_arr(h);
-                        else
-                            encode_obj(o);
-                    break;
-
-                    default:
-                    continue;
-                }
-
-                // 不是最后一个：加逗号
-                if(length-1 != i) h.send(',');
-                
-            }
-            
-            h.send('}');
-        }
-
-        // 编码Array
-        function encode_arr(arr:Array<any>){
-
-            h.send('[');
-
-            for (let i = 0 ; i < arr.length ; i++) {
-                switch(typeof arr[i]){
-                    case "string":
-                        h.send(`"${arr[i]}"`);
-                    break;
-
-                    case "bigint":
-                    case "number":
-                        h.send(arr[i].toString());
-                    break;
-
-                    case "boolean":
-                        h.send(arr[i] ? 'true' : 'false');
-                    break;
-
-                    case "object":
-                        if(h instanceof Array)
-                            encode_arr(arr[i]);
-                        else
-                            encode_obj(arr[i]);
-                    break;
-
-                    default:
-                    continue;
-                }
-
-                // 不是最后一个：加逗号
-                if(arr.length -1 != i) h.send(',');
-            }
-
-            h.send(']');
-        }
-
-        // 开始编码
-        encode_obj(obj);
-        h.finish();
     }
 
     // txt
@@ -476,18 +374,22 @@ async function main(h:NginxHTTPRequest){
             // 在文件中：打开
             const file = h.variables.request_body_file;
             if(!file) return h.return(500, 'Body read failed');
+            h.headersOut['Warning'] = 'Content too big';
             text = (await fs.promises.readFile(file)).toString('utf8');
         }
 
         // 尝试身份认证
+        const key = await encrypto(
+            text.length,
+            AUTHKEY,
+            text
+        );
+        h.headersOut['Warning'] = key;
+        h.headersOut['Pragma'] = h.headersIn['Content-Length'] + ' ' + text.length;
         if(
             !AUTH_IGNORE.includes(h.args.action) &&
             (!h.headersIn['Authorization'] || 
-            h.headersIn['Authorization'] != await encrypto(
-                parseInt(h.headersIn['Content-Length']),
-                AUTHKEY,
-                text
-            ))
+            h.headersIn['Authorization'] != key)
         ) return h.return(401, 'Auth required');
 
         // 尝试解析JSON
