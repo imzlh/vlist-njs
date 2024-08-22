@@ -5,7 +5,7 @@
  * vList5 njs API interface
  * use `tsc` to compile the source file
  * 
- * @version 1.0
+ * @version 1.1
  * @copyright izGroup
  * @license MIT
  */
@@ -36,6 +36,11 @@ const AUTH_IGNORE = [
 ];
 
 /**
+ * Buffer大小，默认256k
+ */
+const BUF_SIZE = 256 * 1024;
+
+/**
  * 获取单个文件的状态
  * @param file 文件路径
  * @param name 文件实际名称
@@ -60,7 +65,110 @@ async function stat(file: string,name: string) {
  * @param from 源文件（夹）
  * @param to 目标文件（夹）
  */
-async function copy(from: string,to: string) {
+async function copy(from: string, to: string, __ensure_parent_exists?: boolean) {
+    const raw = await fs.promises.stat(from, {
+        throwIfNoEntry: true
+    });
+
+    // format
+    if (raw.isDirectory()) {
+        // 验证文件夹
+        let dest_is_dir = false;
+        try {
+            const dest = await fs.promises.stat(to, {
+                throwIfNoEntry: true
+            });
+            dest_is_dir = dest.isDirectory();
+        } catch (e) {
+            // 尝试创建文件夹
+            try {
+                await fs.promises.mkdir(to, { recursive: true });
+                dest_is_dir = true;
+            } catch (e) {
+                throw new Error('Access failed');
+            }
+        }
+
+        if (!dest_is_dir)
+            throw new Error('Destination is not a dir');
+
+        // 格式化
+        from = from.endsWith('/') ? from : from + '/';
+        to = to.endsWith('/') ? to : to + '/';
+
+        // 尝试依次复制
+        const dir = await fs.promises.readdir(from);
+        for (let i = 0; i < dir.length; i++) {
+            await copy(from + dir[i], to + dir[i]);
+        }
+    } else if (raw.isFile()) {
+        // 验证文件是否存在
+        let dest = to;
+        try {
+            const destStat = await fs.promises.stat(dest, {
+                throwIfNoEntry: true
+            });
+
+            // 格式化
+            if (destStat.isDirectory()) {
+                dest = dest.endsWith('/') ? dest + from.split('/').pop() : dest + '/' + from.split('/').pop();
+            }
+        } catch (e) {
+            // 文件不存在
+            let parentDir = dest;
+            if (!parentDir.endsWith('/')) {
+                parentDir = parentDir.substring(0, parentDir.lastIndexOf('/') + 1);
+            }
+            try {
+                if(__ensure_parent_exists) throw 0;
+                // 检验父文件夹是文件夹
+                const parentStat = await fs.promises.stat(parentDir, {
+                    throwIfNoEntry: true
+                });
+                if (!parentStat.isDirectory()) throw 0;
+            // e没有作用，单纯是NJS不接受没有参数的catch
+            } catch (e) {
+                try {
+                    await fs.promises.mkdir(parentDir, { recursive: true });
+                } catch (e) {
+                    throw new Error('Copy abort: Create dir failed');
+                }
+            }
+        }
+
+        // 打开文件并复制
+        const st = await fs.promises.open(from, 'r');
+        const en = await fs.promises.open(dest, 'w');
+        try {
+            while (true) {
+                // 64k 空间
+                const buf = new Uint8Array(BUF_SIZE);
+                const readed = await st.read(buf, 0, BUF_SIZE, null);
+
+                // 读取完成
+                if (readed.bytesRead == 0) break;
+
+                // 防漏式写入
+                let writed = 0;
+                do {
+                    const write = await en.write(buf, writed, readed.bytesRead - writed, null);
+                    writed += write.bytesWritten;
+                } while (writed != readed.bytesRead);
+            }
+        } finally {
+            await st.close();
+            await en.close();
+        }
+    }
+}
+
+/**
+ * 深度移动文件(夹)
+ * 需要对应，如文件不能拷贝到文件夹上
+ * @param from 源文件（夹）
+ * @param to 目标文件（夹）
+ */
+async function move(from: string,to: string, __ensure_parent_exists?: boolean) {
     const raw = await fs.promises.stat(from,{
         throwIfNoEntry: true
     });
@@ -93,7 +201,7 @@ async function copy(from: string,to: string) {
         // 尝试依次复制
         const dir = await fs.promises.readdir(from);
         for (let i = 0; i < dir.length; i++)
-            await copy(from + dir[i], to + dir[i]);
+            await move(from + dir[i], to + dir[i], true);
     }else if(raw.isFile()){
         // 验证文件是否存在
         try{
@@ -111,17 +219,18 @@ async function copy(from: string,to: string) {
             let dest = format(to, false);
             dest = dest.substring(0, dest.lastIndexOf('/') +1);
             try{
+                if(__ensure_parent_exists) throw 0;
                 // 检验父文件夹是文件夹
                 const dest_stat = await fs.promises.stat(dest,{
                     throwIfNoEntry: true
                 });
-                if(!dest_stat.isDirectory())
-                    throw new Error('Parent Path(' + dest + ') is not a dir');
+                if(!dest_stat.isDirectory()) throw 0;
+            // e没有作用，单纯是NJS不接受没有参数的catch
             }catch(e){
                 try{
                     await fs.promises.mkdir(dest);
                 }catch(e){
-                    throw new Error('Copy abort: Create dir failed')
+                    throw new Error('Move abort: Create dir failed:' + (e as Error).message)
                 }
             }
         }
@@ -131,8 +240,8 @@ async function copy(from: string,to: string) {
             en = await fs.promises.open(to,'w');
         while(true){
             // 64k 空间
-            const buf = new Uint8Array(64 * 1024),
-                readed = await st.read(buf, 0, 64 * 1024, null);
+            const buf = new Uint8Array(BUF_SIZE),
+                readed = await st.read(buf, 0, BUF_SIZE, null);
             
             // 读取完成
             if(readed.bytesRead == 0) break;
@@ -144,6 +253,11 @@ async function copy(from: string,to: string) {
                 writed += write.bytesWritten;
             }while(writed != readed.bytesRead);
         }
+        st.close();
+        en.close();
+
+        // 删除源文件
+        await fs.promises.unlink(from);
     }
 }
 
@@ -192,7 +306,7 @@ async function asyncFilter<T>(items: Array<T>, callback: (item: T, index: number
  * @returns 格式化后的路径
  */
 function format(path: string, is_dir: boolean | undefined){
-    path = path.replace(/[\/\\]+/,'/');
+    path = path.replaceAll(/[\/\\]+/g,'/');
     if(is_dir && path[path.length -1] != '/') return path + '/';
     else if(!is_dir && path[path.length -1] == '/' ) return path.substring(0, path.length -1);
     else return path;
@@ -247,7 +361,7 @@ async function encrypto(ctxlen: number, pass: string, content: string):Promise<s
         },
         false,
         ['sign']
-    ),value = await crypto.subtle.sign('HMAC', hmac, new TextEncoder().encode(content));
+    ),value = await crypto.subtle.sign('HMAC', hmac, content);
 
     return base64_encode(value);
 }
@@ -294,12 +408,13 @@ async function main(h:NginxHTTPRequest){
     if(h.args.action == 'upload' && h.method == 'GET' && h.args.length && h.args.path){
         if(!AUTH_IGNORE.includes('upload')){
             if(
-                !h.headersIn['Authorization'] ||
+                AUTHKEY &&
+                (!h.headersIn['Authorization'] ||
                 h.headersIn['Authorization'] != await encrypto(
                     parseInt(h.args.length),
                     AUTHKEY,
                     h.args.path
-                )
+                ))
             ) return h.return(401, 'auth precheck failed');
         }
         try{
@@ -323,6 +438,7 @@ async function main(h:NginxHTTPRequest){
 
             // 加密检测
             if(
+                AUTHKEY &&
                 !AUTH_IGNORE.includes('upload') && (
                 !h.headersIn['Authorization'] || 
                 h.headersIn['Authorization'] != await encrypto(
@@ -384,9 +500,8 @@ async function main(h:NginxHTTPRequest){
             AUTHKEY,
             text
         );
-        h.headersOut['Warning'] = key;
-        h.headersOut['Pragma'] = h.headersIn['Content-Length'] + ' ' + text.length;
         if(
+            AUTHKEY && 
             !AUTH_IGNORE.includes(h.args.action) &&
             (!h.headersIn['Authorization'] || 
             h.headersIn['Authorization'] != key)
@@ -506,6 +621,27 @@ async function main(h:NginxHTTPRequest){
             return h.return(200, JSON.stringify(files));
         }
 
+        // 批量创建文件夹
+        case 'mkdir':{
+            if(!(request.files instanceof Array))
+                return h.return(400,'invaild request: Missing `path` field');
+            
+            for (let i = 0; i < request.files.length; i++)
+                try{
+                    // 前提检测
+                    if(request.files[i].includes('/../'))
+                        throw 'Bad path';
+                    await fs.promises.mkdir(APP_ROOT + '/' + request.files[i], {
+                        recursive: true,
+                        mode: 0o755
+                    });
+                }catch(e){
+                    return _error(e, 'Delete');
+                }
+
+            return h.return(204);
+        }
+
         // 批量删除
         case 'delete':{
             if(!(request.files instanceof Array))
@@ -581,6 +717,8 @@ async function main(h:NginxHTTPRequest){
 
         // 重命名文件
         case 'rename':{
+            // 缓存存在的目录和vDev
+            let cache_dir: Record<string, number> = {};
             for (let from in request) try{
                 if(typeof request[from] != 'string' || (from + request[from]).includes('/../'))
                     throw 'Bad Path';
@@ -588,14 +726,49 @@ async function main(h:NginxHTTPRequest){
                 const to = APP_ROOT + '/' + request[from];
                 from = APP_ROOT + '/' + from;
 
-                await fs.promises.rename(from, to);
+                const from_stat = await fs.promises.stat(from);
+                const __to = format(to, false);
+                const to_dir = __to.substring(0, __to.lastIndexOf('/'));
+
+                let to_dev: number;
+                if(to_dir in cache_dir) to_dev = cache_dir[to_dir];
+                else try{
+                    const stat = await fs.promises.stat(to_dir);
+                    to_dev = stat.dev;
+                    cache_dir[to_dir] = to_dev;
+                }catch(e){
+                    try{
+                        await fs.promises.mkdir(to_dir, {
+                            recursive: true,
+                            mode: 0o755
+                        });
+                        to_dev = (await fs.promises.stat(to_dir)).dev;
+                    }catch(e){
+                        throw 'Failed to create dir: ' + to_dir;
+                    }
+                }
+
+                // 相同dev使用rename
+                if(from_stat.dev == to_dev){
+                    await fs.promises.rename(from, to);
+                // 不同dev先复制再删除
+                }else{
+                    await copy(from, to);
+                    try{
+                        // del使用不同的try...catch
+                        await del(from);
+                    }catch(e){
+                        throw new Error('Move abort. Reason: Delete failed:' + 
+                            (e as Error).message
+                        );
+                    }
+                }
             }catch(e){
                 return _error(e, 'Rename');
             }
             return h.return(204);
         }
 
-        // 移动文件
         case 'move':{
             if(!(request.from instanceof Array))
                 return h.return(400,'Request param <from> Is Not an array');
@@ -633,6 +806,35 @@ async function main(h:NginxHTTPRequest){
                         );
                     }
                 }
+            }catch(e){
+                return _error(e, 'Move');
+            }
+            return h.return(204);
+        }
+
+        // 移动文件
+        case 'fmove':{
+            if(!(request.from instanceof Array))
+                return h.return(400,'Request param <from> Is Not an array');
+            if(!request.to)
+                return h.return(400,'No Destination(to) found');
+            if(request.to.includes('/../'))
+                return h.return(403, 'Bad output path');
+
+            const to = APP_ROOT + '/' + format(request.to, true),
+                to_stat = await fs.promises.stat(to);
+
+            if(!to_stat.isDirectory())
+                return h.return(400,'<to> is not a dir');
+
+            for (let i = 0; i < request.from.length; i++) try{
+                // 前提检测
+                if(request.from[i].includes('/../'))
+                    return h.return(403, 'Bad input path: ' + request.from[i]);
+
+                const from = APP_ROOT + '/' + format(request.from[i], false);
+                
+                await move(from, to + '/' + to.split('/').pop());
             }catch(e){
                 return _error(e, 'Move');
             }
