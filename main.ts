@@ -98,9 +98,9 @@ async function copy(from: string, to: string, __ensure_parent_exists?: boolean) 
 
         // 尝试依次复制
         const dir = await fs.promises.readdir(from);
-        for (let i = 0; i < dir.length; i++) {
-            await copy(from + dir[i], to + dir[i]);
-        }
+        for (let i = 0; i < dir.length; i++)
+            if(dir[i] != '.' && dir[i] != '..')
+                await copy(from + dir[i], to + dir[i]);
     } else if (raw.isFile()) {
         // 验证文件是否存在
         let dest = to;
@@ -167,97 +167,40 @@ async function copy(from: string, to: string, __ensure_parent_exists?: boolean) 
  * 需要对应，如文件不能拷贝到文件夹上
  * @param from 源文件（夹）
  * @param to 目标文件（夹）
+ * @param parent_devID 父目标文件夹的devID
  */
-async function move(from: string,to: string, __ensure_parent_exists?: boolean) {
-    const raw = await fs.promises.stat(from,{
+async function move(from: string,to: string, parent_devID: number) {
+    const from_stat = await fs.promises.stat(from, {
         throwIfNoEntry: true
     });
 
-    // format
-    if(raw.isDirectory()){
-        // 验证文件夹
-        try{
-            const dest = await fs.promises.stat(to, {
-                throwIfNoEntry: true
-            });
-            var dest_is_dir = dest.isDirectory();
-        }catch(e){
-            // 尝试创建文件夹
-            try{
-                await fs.promises.mkdir(to);
-                var dest_is_dir = true;
-            }catch(e){
-                throw new Error('Access failed');
+    try{
+        var to_stat = await fs.promises.stat(to, { throwIfNoEntry: true });
+
+        // 合并文件夹
+        if(to_stat.isDirectory()){
+            const files = await fs.promises.readdir(from);
+            for (let i = 0; i < files.length; i++){
+                const item = files[i];
+                if(item != '.' && item != '..')
+                    await move(from + '/' + item, to + '/' + item, from_stat.dev);
             }
+            await fs.promises.rmdir(from);
+        // 文件操作
+        }else if(to_stat.dev == from_stat.dev)
+            await fs.promises.rename(from, to);
+        else{
+            await copy(from, to, true);
+            await del(from);
         }
-
-        if(!dest_is_dir)
-            throw new Error('Destination is not a dir');
-        
-        // 格式化
-        from = format(from, true);
-        to = format(to, true);
-
-        // 尝试依次复制
-        const dir = await fs.promises.readdir(from);
-        for (let i = 0; i < dir.length; i++)
-            await move(from + dir[i], to + dir[i], true);
-    }else if(raw.isFile()){
-        // 验证文件是否存在
-        try{
-            const dest = await fs.promises.stat(to, {
-                throwIfNoEntry: true
-            });
-
-            // 格式化
-            if(dest.isDirectory())
-                to = format(to, true) + format(from,false).split('/').pop();
-            else
-                to = format(to, false);
-        }catch(e){
-            // 文件不存在
-            let dest = format(to, false);
-            dest = dest.substring(0, dest.lastIndexOf('/') +1);
-            try{
-                if(__ensure_parent_exists) throw 0;
-                // 检验父文件夹是文件夹
-                const dest_stat = await fs.promises.stat(dest,{
-                    throwIfNoEntry: true
-                });
-                if(!dest_stat.isDirectory()) throw 0;
-            // e没有作用，单纯是NJS不接受没有参数的catch
-            }catch(e){
-                try{
-                    await fs.promises.mkdir(dest);
-                }catch(e){
-                    throw new Error('Move abort: Create dir failed:' + (e as Error).message)
-                }
-            }
+    }catch(e){
+        // 直接移动
+        if(parent_devID == from_stat.dev)
+            await fs.promises.rename(from, to);
+        else{
+            await copy(from, to, true);
+            await del(from);
         }
-
-        // 打开文件并复制
-        const st = await fs.promises.open(from,'r'),
-            en = await fs.promises.open(to,'w');
-        while(true){
-            // 64k 空间
-            const buf = new Uint8Array(BUF_SIZE),
-                readed = await st.read(buf, 0, BUF_SIZE, null);
-            
-            // 读取完成
-            if(readed.bytesRead == 0) break;
-
-            // 防漏式写入
-            let writed = 0;
-            do{
-                const write = await en.write(buf, writed, readed.bytesRead - writed, null);
-                writed += write.bytesWritten;
-            }while(writed != readed.bytesRead);
-        }
-        st.close();
-        en.close();
-
-        // 删除源文件
-        await fs.promises.unlink(from);
     }
 }
 
@@ -279,7 +222,8 @@ async function del(path: string) {
     path = path[path.length -1] == '/' ? path : path + '/';
     const items = await fs.promises.readdir(path);
     for (let i = 0; i < items.length; i++)
-        await del(path + items[i]);
+        if(items[i] != '.' && items[i] != '..')
+            await del(path + items[i]);
 
     // 删除空目录
     await fs.promises.rmdir(path);
@@ -535,7 +479,7 @@ async function main(h:NginxHTTPRequest){
             for (let i = 0; i < files.length; i++)
                 try{
                     // 隐藏文件
-                    if(HIDE_FILES(files[i])) continue;
+                    if(files[i] == '.' || files[i] == '..' || HIDE_FILES(files[i])) continue;
                     const statres = await stat(dir + '/' + files[i],files[i]);
                     res.push(statres);
                 }catch(e){
@@ -834,7 +778,7 @@ async function main(h:NginxHTTPRequest){
 
                 const from = APP_ROOT + '/' + format(request.from[i], false);
                 
-                await move(from, to + '/' + to.split('/').pop());
+                await move(from, to + '/' + request.from[i].split('/').pop(), to_stat.dev);
             }catch(e){
                 return _error(e, 'Move');
             }
