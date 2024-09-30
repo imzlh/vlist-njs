@@ -26,9 +26,9 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
-    - run: npm install -g typescript
-    - run: git clone https://github.com/nginx/njs.git && mv njs/ts/ type
-    - run: tsc --target ES2022 --lib ES2022 main.ts
+    - run: npm install
+    - run: npm run clone-type
+    - run: npm run build
     - name: Upload binaries to release
       uses: svenstaro/upload-release-action@v2
       with:

@@ -778,7 +778,7 @@ async function main(h:NginxHTTPRequest){
 
                 const from = APP_ROOT + '/' + format(request.from[i], false);
                 
-                await move(from, to + '/' + request.from[i].split('/').pop(), to_stat.dev);
+                await move(from, to + '/' + from.split('/').pop(), to_stat.dev);
             }catch(e){
                 return _error(e, 'Move');
             }

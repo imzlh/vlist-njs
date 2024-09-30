@@ -1,0 +1,13 @@
+{
+  "name": "vlist-ngx-api",
+  "version": "5.7",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --target ES2022 --lib ES2022 main.ts",
+    "clone-type": "git clone https://github.com/nginx/njs.git && mv njs/ts/ type"
+  },
+  "dependencies": {
+    "typescript": "~5.4.0"
+  }
+}
