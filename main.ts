@@ -361,6 +361,11 @@ async function main(h:NginxHTTPRequest){
                 ))
             ) return h.return(401, 'auth precheck failed');
         }
+        if(h.args.overwrite == 'false') try{
+            await fs.promises.access(APP_ROOT + '/' + format(h.args.path,false),fs.constants.F_OK);
+        }catch(e){
+            return h.return(400, 'File already exists');
+        }
         try{
             await fs.promises.writeFile(APP_ROOT + '/' + format(h.args.path,false), '');
         }catch(e){
