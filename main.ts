@@ -54,6 +54,7 @@ async function stat(file: string,name: string) {
         'type': i.isDirectory() ? 'dir' : 'file',
         'name': name,
         'ctime': i.ctime.getTime(),
+        'mtime': i.mtime.getTime(),
         'access': i.mode,
         'size': i.size
     };
